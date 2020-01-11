@@ -94,50 +94,96 @@
       (hasher (equal+hash-content)))
 
     ; printable<%>
-    (abstract print-content)
+    (define/public (build-print-content attached?)
+      ; Return a list suitable for the second part of a constructor-style-printer.
+      (let* ([target (and (not attached?)
+                          (join? this)
+                          (join-target this))]
+             [target (if (base-query? target)
+                         (send target query-tuple)
+                         target)]
+             [join-shims (map (λ (j) (join-shim j #t))
+                              (attached-joins))]
+             ; Build the list backwards:
+             [lst (query-clauses/printable)]
+             [lst (append join-shims lst)]
+             [lst (if target
+                      (cons (symbol-printer '#:to) (cons target lst))
+                      lst)]
+             [lst (cons queryable lst)]
+             [lst (cons my-tuple lst)])
+        lst))
+    (abstract do-print)
     (define/public (custom-print port mode)
-      (print (print-content) port mode))
+      (do-print port mode))
     (define/public (custom-write port)
-      (write (print-content) port))
+      (do-print port #t))
     (define/public (custom-display port)
-      (display (print-content) port))))
+      (do-print port #f))))
 
 (define base-query-content-builder (class-field-accessor base-query% content-builder))
 
 (define query%
   (class* base-query% ()
     (super-new)
-    (inherit-field alias queryable)
-    (inherit query-content)
+    (inherit-field queryable)
+    (inherit query-content attached-joins)
 
     (define/override (equal+hash-content)
       (list (query-content)
             queryable))
 
-    (define/override (print-content)
-      (base-query-printer this))))
+    (define/override (do-print port mode)
+      (with-write-scope (cons this (attached-joins))
+        (query-printer this port mode)))))
+
+(define query-printer
+  (make-constructor-style-printer
+   (λ (me) 'from)
+   (λ (me) (send me build-print-content #f))))
 
 (define join%
   (class* base-query% (join<%>)
     (super-new)
     (init-field target)
-    (inherit-field alias queryable)
-    (inherit query-content query-tuple)
+    (inherit-field queryable)
+    (inherit query-content attached-joins)
 
     (define/override (equal+hash-content)
       (list (query-content)
             queryable
             (join-target this)))
 
-    ; join<%>
-    (define/public (join-link) target)
-
-    ; printable<%>
-    (define/override (print-content)
+    (define/override (do-print port mode)
       (let ([found (write-scope-find this)])
         (if found
-            (query-tuple)
-            (base-query-printer this))))))
+            (write-string found port)
+            (with-write-scope (cons this (attached-joins))
+              (let ([content (join-shim this #f)])
+                (case mode
+                  [(#t) (write content port)]
+                  [(#f) (display content port)]
+                  [else (print content port mode)]))))))
+
+    ; join<%>
+    (define/public (join-link) target)))
+
+(define join-printer
+  (make-constructor-style-printer
+   (λ (me) (if (join-shim-attached? me)
+               'attach
+               'join))
+   (λ (me) (let ([j (join-shim-join me)]
+                 [attached? (join-shim-attached? me)])
+             (send j build-print-content attached?)))))
+
+(struct join-shim (join attached?)
+  #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define (write-proc me port mode)
+     (let ([j (join-shim-join me)])
+       (with-write-scope (send j attached-joins)
+         (join-printer me port mode))))])
 
 (define (write-tuple me port mode)
   ; If this tuple refers to an enclosing query or join, then try to use that name.
@@ -272,6 +318,18 @@
 (module+ test
   (require rackunit)
 
+  (define (print-bq bq)
+    ; For some reason, ~v works fine in DrRacket, but via `raco test`
+    ; it finds and prints cycles with #0=
+    #;(~v bq)
+    ; Pretty printing works around this issue.
+    ; What is even stranger is that this workaround is not needed
+    ; elsewhere, grep for search-key-t4290brfq
+    (parameterize ([pretty-print-columns 'infinity])
+      (let* ([port (open-output-string)])
+        (pretty-print bq port)
+        (string-trim (get-output-string port)))))
+
   ; does check-equal? and checks that the printable representations are also equal
   (define-syntax (check-same stx)
     (syntax-case stx ()
@@ -282,7 +340,7 @@
            #,(syntax/loc stx
                (check-equal? a b))
            #,(syntax/loc stx
-               (check-equal? (~v a) (~v b)))))]))
+               (check-equal? (print-bq a) (print-bq b)))))]))
 
   (check-same
    (from a "A" a a a)
@@ -344,7 +402,7 @@
 
   (define (str x)
     (if (base-query? x)
-        (~v x)
+        (print-bq x)
         (substring (~v x) 1)))
 
   (check-equal?
