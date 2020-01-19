@@ -156,8 +156,10 @@
       [(list) (list)]
       [(list a rest ...)
        ; Don't put `a` into the result here, because then it could get replaced
-       ; by an injection. Doing `(sql (token-content a))` should prevent this.
-       (cons (select (sql (token-content a))
+       ; by an injection. We need to reduce!
+       ; (Hmm, I wonder if `(go1 a)` would be more appropriate here?
+       ;   Or would that double-reduce the entire content?)
+       (cons (select (sql (sql-token-reduce a))
                      (format " as __INJECT~a" index))
              (convert-to-selects rest (add1 index)))]))
   ; We are only "inside the join" during make-query. The join-on clauses live outside.
