@@ -530,6 +530,7 @@ HEREDOC
 select x.*
 from Foo x
 inner join Bar x1
+   on 1=1
 where x.id = x1.id
 HEREDOC
              )
@@ -671,6 +672,19 @@ inner join (
   from Category c
   where c.CategoryID = s.CategoryID
 ) c
+   on 1=1
+HEREDOC
+             )
+
+  ; If there are no join-on clauses we assume a cross product.
+  ; We need "1=1" to make valid SQL
+  (set! q (from a "A"
+                (attach b "B")))
+  (check-sql q #<<HEREDOC
+select a.*
+from A a
+inner join B b
+   on 1=1
 HEREDOC
              )
 

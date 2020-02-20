@@ -149,7 +149,12 @@
 
 (define (make-join-raw j)
   #;(-> join? r:join?)
-  (define clauses (query-clauses j))
+  (define join-ons
+    (let* ([clauses (query-clauses j)]
+           [clauses (get 'join-on clauses)])
+      (if (empty? clauses)
+          (list "1=1")
+          clauses)))
   (define injections (inj-lookup j))
   (define (convert-to-selects injections index)
     (match injections
@@ -167,7 +172,7 @@
                       (make-query j (convert-to-selects injections 0))))
   (r:make-join the-query
                #:type (or (get-join-type j) 'inner)
-               #:join-ons (get 'join-on clauses)))
+               #:join-ons join-ons))
 
 (define (make-join j)
   (with-unique-aliases (targeted-joins j)
