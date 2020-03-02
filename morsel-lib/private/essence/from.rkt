@@ -2,6 +2,9 @@
 
 (provide from (rename-out [:join join]) attach)
 
+(module+ TODO-PRIVATE
+  (provide flatten-lists?))
+
 (require "../util.rkt"
          "model.rkt"
          "content.rkt"
@@ -194,11 +197,18 @@
                       (format "#<tuple: ~a>" (tuple-queryable me)))
                   port)))
 
+(define flatten-lists? (make-parameter #f))
+
 (define (add-clause content clause)
   #;(-> content? any/c content?)
   (define (add-to-print content)
     (content-cons content :print-clauses clause))
   (cond
+    [(and (list? clause)
+          (flatten-lists?))
+     (for/fold ([content content])
+               ([clause clause])
+       (add-clause content clause))]
     [(void? clause)
      content]
     [(clause? clause)
@@ -278,11 +288,15 @@
                  (get-stuff qval)]
                 [(alias) (or alias
                              (clean-alias 'tuple-id))]
+                [(params) (current-parameterization)]
                 [(content-builder)
                  (λ (tuple)
-                   (let ([tuple-id tuple])
-                     (apply-all tuple-id (append-content-builder tuple-id)
-                                statement ...)))])
+                   (call-with-parameterization
+                    params
+                    (λ ()
+                      (let ([tuple-id tuple])
+                        (apply-all tuple-id (append-content-builder tuple-id)
+                                   statement ...)))))])
     (new query%
          [content-builder content-builder]
          [alias alias]
@@ -301,11 +315,15 @@
                      ; we expect that it points to a query and not a join. We will determine the
                      ; "final target" on demand (by passing through simple joins).
                      [(link) link-expr]
+                     [(params) (current-parameterization)]
                      [(content-builder)
                       (λ (tuple)
-                        (let ([tuple-id tuple])
-                          (apply-all tuple-id (append-content-builder tuple-id)
-                                     statement ...)))])
+                        (call-with-parameterization
+                         params
+                         (λ ()
+                           (let ([tuple-id tuple])
+                             (apply-all tuple-id (append-content-builder tuple-id)
+                                        statement ...)))))])
          (new join%
               [content-builder content-builder]
               [alias alias]
