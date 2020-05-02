@@ -5,6 +5,9 @@
          limit offset distinct join-type
          :limit :offset :distinct get-join-type)
 
+(module+ TODO-for-plisqin
+  (provide clause<%> content-set :limit :offset :distinct :join-type))
+
 (require racket/struct
          "sql-token.rkt"
          "../_essence.rkt")
