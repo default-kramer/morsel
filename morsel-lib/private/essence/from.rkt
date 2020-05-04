@@ -223,6 +223,19 @@
 (define-syntax-parameter attach
   (λ (stx) (raise-syntax-error #f "used out of context" stx)))
 
+(define-syntax (apply-all-no-special-forms stx)
+  (syntax-case stx ()
+    [(_ id content clause more ...)
+     #`(apply-all id
+                  (add-clause content clause)
+                  more ...)]
+    [(_ id content)
+     ; This approach runs once per append.
+     ; A slight optimization would be to only run `cleanup` once, when we know that
+     ; we are at the top level (no more appending). Then we could reverse the clauses
+     ; once instead of doing it on demand later.
+     #'(cleanup content)]))
+
 ; Returns new content by applying statements in order to the given content.
 (define-syntax (apply-all stx)
   (syntax-case stx (define attach)
@@ -240,16 +253,22 @@
     [(_ id content (define val-id val-expr) more ...)
      #'(let ([val-id val-expr])
          (apply-all id content more ...))]
-    [(_ id content clause more ...)
-     #`(apply-all id
-                  (add-clause content clause)
-                  more ...)]
-    [(_ id content)
-     ; This approach runs once per append.
-     ; A slight optimization would be to only run `cleanup` once, when we know that
-     ; we are at the top level (no more appending). Then we could reverse the clauses
-     ; once instead of doing it on demand later.
-     #'(cleanup content)]))
+    [(_ id content (macro stuff ...) more ...)
+     (and (identifier? #'macro)
+          (syntax-local-value #'macro (lambda () #f)))
+     (let* ([expanded (local-expand #'(macro stuff ...)
+                                    'module
+                                    (list #'define #'attach))]
+            [head (car (syntax->list expanded))]
+            ; did we local-expand to something we will recognize?
+            [recur? (or (free-identifier=? head #'define)
+                        (free-identifier=? head #'attach))]
+            [reapply (if recur?
+                         #'apply-all
+                         #'apply-all-no-special-forms)])
+       #`(#,reapply id content #,expanded more ...))]
+    [(_ stuff ...)
+     #'(apply-all-no-special-forms stuff ...)]))
 
 (define (cleanup content)
   #;(-> content? content?)
