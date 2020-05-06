@@ -688,4 +688,8 @@ inner join B b
 HEREDOC
              )
 
+  ; to-sql accepts strings
+  (check-equal? (to-sql "hello world")
+                "hello world")
+
   (void "end module"))

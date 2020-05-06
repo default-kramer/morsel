@@ -194,5 +194,7 @@
   (proc x))
 
 (define (to-sql x)
-  (parameterize ([current-injection-lookup (calc-injections x)])
-    (r:render-root (go1 x))))
+  (if (string? x)
+      x
+      (parameterize ([current-injection-lookup (calc-injections x)])
+        (r:render-root (go1 x)))))
