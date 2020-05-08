@@ -75,6 +75,9 @@
     [(sql-token? x) (go (sql-token-reduce x))]
     [(list? x) (apply go x)]
     [(string? x) x]
+    ; We could allow the dialect or some other parameter to control
+    ; how symbols are printed. For now, just go directly to string.
+    [(symbol? x) (~a x)]
     [(number? x) (~a x)]
     ; We might have found a query in some nested content, like a subquery.
     ; If so, we know that it has already been reduced.

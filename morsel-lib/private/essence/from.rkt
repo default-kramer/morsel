@@ -194,7 +194,7 @@
   (let* ([q (:tuple-query me)]
          [name (and q (write-scope-find q))])
     (write-string (or name
-                      (format "#<tuple: ~a>" (tuple-queryable me)))
+                      (format "#<tuple: ~v>" (tuple-queryable me)))
                   port)))
 
 (define flatten-lists? (make-parameter #f))
