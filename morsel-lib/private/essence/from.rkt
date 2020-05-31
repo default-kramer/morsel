@@ -1,6 +1,6 @@
 #lang racket
 
-(provide from (rename-out [:join join]) attach)
+(provide from (rename-out [:join join]) attach safe-write)
 
 (module+ TODO-PRIVATE
   (provide flatten-lists?))
@@ -42,6 +42,28 @@
   ; should be the *only* possible cause, I think.
   "Infinite loop averted. Likely cause: an equal or hash operation on a tuple.")
 
+; This should not be equal? to anything else
+(define (make-fail-content)
+  (content-cons (new-content) :clauses (gensym 'morsel-fail-content-)))
+
+(define safe-write? (make-parameter #f))
+
+; Evaluates `expr` in a context where the exn:fail:premature-query-access
+; will not be thrown. This is useful to avoid causing new errors while trying
+; to produce an error message.
+; It would be nice if we could guess when to safe-write and when to throw the
+; exception, but I don't think it is possible. It's certainly safer to allow
+; error message writers to opt-in to this exception-swallowing context.
+; Warning! This macro cannot protect you from the fact that certain writing
+; mechanisms (like pretty printing) are lazy.
+; To be absolutely certain it will work, have `expr` return the string you want.
+(define-syntax-rule (safe-write expr)
+  (parameterize ([safe-write? #t])
+    ; On error, we just try once more in case the latch wasn't set the first time
+    (with-handlers ([exn:fail:premature-query-access?
+                     (lambda (err) expr)])
+      expr)))
+
 (define base-query%
   (class* object% (base-query<%> equal<%> printable<%> never-quote<%>)
     ; content-builder is a function of (-> tuple? content?)
@@ -51,12 +73,22 @@
     (super-new)
     (define my-tuple (tuple this alias queryable))
 
+    ; If we avert an infinite loop, we will set fail-content to some unique
+    ; content before throwing the exception.
+    ; This has acceptable equal+hash semantics because a query with an error
+    ; should not be equal to anything else.
+    (define fail-content #f)
+    (define (get-fail-content)
+      (and (safe-write?) fail-content))
+
     (define content #f)
     (define content-loop-detector #f)
     (define/public (query-content)
-      (or content
+      (or (get-fail-content)
+          content
           (begin
             (when content-loop-detector
+              (set! fail-content (make-fail-content))
               (raise (exn:fail:premature-query-access msg (current-continuation-marks))))
             (set! content-loop-detector #t)
             (set! content (content-builder my-tuple))
@@ -89,12 +121,18 @@
 
     ; equal<%>
     (abstract equal+hash-content)
+    (define (eq-shim)
+      ; I think this is needed because the pretty printer explores using
+      ; equal and or hash operations...
+      ; But why isn't this same check in `query-content` enough? Hmm...
+      (or (get-fail-content)
+          (equal+hash-content)))
     (define/public (equal-to? other recur)
-      (recur (equal+hash-content) (send other equal+hash-content)))
+      (recur (eq-shim) (send other equal+hash-content)))
     (define/public (equal-hash-code-of hasher)
-      (hasher (equal+hash-content)))
+      (hasher (eq-shim)))
     (define/public (equal-secondary-hash-code-of hasher)
-      (hasher (equal+hash-content)))
+      (hasher (eq-shim)))
 
     ; printable<%>
     (define/public (build-print-content attached?)
@@ -117,12 +155,19 @@
              [lst (cons my-tuple lst)])
         lst))
     (abstract do-print)
+    (define (do-print2 port mode)
+      ; I'm not sure if it is possible to hit the true branch here,
+      ; but better safe than sorry
+      (if (get-fail-content)
+          (write-string (format "#<broken query or join: ~a>" queryable)
+                        port)
+          (do-print port mode)))
     (define/public (custom-print port mode)
-      (do-print port mode))
+      (do-print2 port mode))
     (define/public (custom-write port)
-      (do-print port #t))
+      (do-print2 port #t))
     (define/public (custom-display port)
-      (do-print port #f))))
+      (do-print2 port #f))))
 
 (define base-query-content-builder (class-field-accessor base-query% content-builder))
 
@@ -189,13 +234,17 @@
          (join-printer me port mode))))])
 
 (define (write-tuple me port mode)
-  ; If this tuple refers to an enclosing query or join, then try to use that name.
-  ; The enclosing query or join should have registered itself into the namescope earlier.
-  (let* ([q (:tuple-query me)]
-         [name (and q (write-scope-find q))])
+  (define (helper name)
     (write-string (or name
                       (format "#<tuple: ~v>" (tuple-queryable me)))
-                  port)))
+                  port))
+  (with-handlers ([exn:fail:premature-query-access?
+                   (lambda (err) (helper #f))])
+    ; If this tuple refers to an enclosing query or join, then try to use that name.
+    ; The enclosing query or join should have registered itself into the namescope earlier.
+    (let* ([q (:tuple-query me)]
+           [name (and q (write-scope-find q))])
+      (helper name))))
 
 (define flatten-lists? (make-parameter #f))
 
