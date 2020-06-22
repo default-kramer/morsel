@@ -22,8 +22,11 @@
   (define-syntax (check-sql stx)
     (syntax-case stx ()
       [(_ q sql)
-       (syntax/loc stx
-         (check-equal? (to-sql q) sql))]))
+       (with-syntax ([actual-sql (gensym)])
+         (quasisyntax/loc stx
+           (let ([actual-sql #,(syntax/loc stx (to-sql q))])
+             #,(syntax/loc stx
+                 (check-equal? actual-sql sql)))))]))
 
   (define q #f)
   (define expected #f)
@@ -691,5 +694,76 @@ HEREDOC
   ; to-sql accepts strings
   (check-equal? (to-sql "hello world")
                 "hello world")
+
+
+  ; Regression: Multiple simple joins inside a grouped join.
+  (set! expected #<<HEREDOC
+select detailsG.__INJECT1
+from ProductCategory cat
+left join (
+  select subcat.ProductCategoryID as __INJECT0
+    , avg(detailsG.LineTotal) as __INJECT1
+  from SalesOrderDetail detailsG
+  inner join Product prd
+     on prd.ProductID = detailsG.ProductID
+  inner join ProductSubcategory subcat
+     on subcat.ProductSubcategoryID = prd.ProductSubcategoryID
+  group by subcat.ProductCategoryID
+) detailsG
+   on detailsG.__INJECT0 = cat.ProductCategoryID
+HEREDOC
+        )
+  (set! q (from cat 'ProductCategory
+                (attach detailsG 'SalesOrderDetail
+                        (join-type 'left)
+                        (attach prd 'Product
+                                (join-on prd".ProductID = "detailsG".ProductID"))
+                        (define subcat
+                          (join subcat 'ProductSubcategory #:to detailsG
+                                (join-on subcat".ProductSubcategoryID = "prd".ProductSubcategoryID")))
+                        (define catID
+                          (scalar subcat".ProductCategoryID"))
+                        (group-by catID)
+                        (join-on catID" = "(scalar cat".ProductCategoryID")))
+                (select (avg (scalar detailsG".LineTotal")))))
+  (check-sql q expected)
+
+  (set! q (from cat 'ProductCategory
+                (attach detailsG 'SalesOrderDetail
+                        (join-type 'left)
+                        ; This was the real bug. When both joins are attached,
+                        ; the deduplication logic triggered a cycle:
+                        (attach prd 'Product
+                                (join-on prd".ProductID = "detailsG".ProductID"))
+                        (attach subcat 'ProductSubcategory
+                                (join-on subcat".ProductSubcategoryID = "prd".ProductSubcategoryID"))
+                        (define catID
+                          (scalar subcat".ProductCategoryID"))
+                        (group-by catID)
+                        (join-on catID" = "(scalar cat".ProductCategoryID")))
+                (select (avg (scalar detailsG".LineTotal")))))
+  (check-sql q expected)
+  (check-not-exn (lambda () (format "~a ~s ~v" q q q)))
+
+  ; Regression: I don't even know why this was failing, but I fixed it while
+  ; fixing the previous one. Very strangely, (join-on a".foo = "b".foo") was
+  ; broken but (join-on b".foo = "a".foo") was not!
+  ; So let's just test both...
+  (set! q (from a 'A
+                (attach b 'B
+                        (join-on a".foo = "b".foo"))
+                (attach c 'C
+                        (join-on c".bar = "b".bar"))))
+  (check-not-exn (lambda () (format "~a ~s ~v" q q q)))
+  (check-not-exn (lambda () (to-sql q)))
+
+  (set! q (from a 'A
+                (attach b 'B
+                        (join-on b".foo = "a".foo"))
+                (attach c 'C
+                        (join-on c".bar = "b".bar"))))
+  (check-not-exn (lambda () (format "~a ~s ~v" q q q)))
+  (check-not-exn (lambda () (to-sql q)))
+
 
   (void "end module"))

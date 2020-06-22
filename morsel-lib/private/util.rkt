@@ -1,6 +1,6 @@
 #lang racket
 
-(provide def-struct)
+(provide def-struct (rename-out [eq-shim make-eq-shim]))
 
 (require racket/struct)
 
@@ -19,3 +19,14 @@
     #:methods gen:custom-write
     [(define (write-proc me port mode)
        (writer me port mode))]))
+
+; A wrapper that makes all equality use eq? equality
+(struct eq-shim (content)
+  #:methods gen:equal+hash
+  [(define (equal-proc a b equal?)
+     (eq? (eq-shim-content a)
+          (eq-shim-content b)))
+   (define (hash-proc a hasher)
+     (eq-hash-code (eq-shim-content a)))
+   (define (hash2-proc a hasher)
+     (eq-hash-code (eq-shim-content a)))])

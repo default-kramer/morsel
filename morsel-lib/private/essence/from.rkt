@@ -69,7 +69,8 @@
     ; content-builder is a function of (-> tuple? content?)
     ; This makes appending easy - we just call the original content-builder with our
     ; new tuple, then append to it.
-    (init-field content-builder alias queryable)
+    (init-field content-builder alias queryable
+                [cycle-breaker (make-parameter #f)])
     (super-new)
     (define my-tuple (tuple this alias queryable))
 
@@ -89,9 +90,12 @@
           (begin
             (when content-loop-detector
               (set! fail-content (make-fail-content))
+              ;(println (format " FAIL: ~a ~a" alias queryable))
               (raise (exn:fail:premature-query-access msg (current-continuation-marks))))
+            ;(println (format "BEGIN: ~a ~a" alias queryable))
             (set! content-loop-detector #t)
             (set! content (content-builder my-tuple))
+            ;(println (format "  END: ~a ~a" alias queryable))
             content)))
 
     (define (query-joins)
@@ -128,7 +132,32 @@
       (or (get-fail-content)
           (equal+hash-content)))
     (define/public (equal-to? other recur)
-      (recur (eq-shim) (send other equal+hash-content)))
+      ; This cycle-breaker strategy seems to be best.
+      ; Let's say we are doing an equal operation on X1 and X2.
+      ; This `equal-to?` method eventually gets called on two queries Q1 and Q2
+      ; which are found within X1 and X2.
+      ; When we encounter Q1 and Q2 for the first time, we mark them as
+      ; "potentially equal" by setting their cycle-breakers to the same unique
+      ; value before proceeding to explore their contents.
+      ; When we encounter Q1 and Q2 a second time (via a cycle in the data
+      ; structure), they are no longer "potentially equal" -- we can now say
+      ; that they are definitely equal (or definitely not equal).
+      ;
+      ; Is it possible that some weird structure might mean that we encounter
+      ; Q1 before Q2 even though they are otherwise equal?
+      ; Maybe, but then X1 and X2 are not equal so it is OK to return false.
+      ; (At least I think so... but all I can say is that is passes all the tests.)
+      ;
+      ; Hashing doesn't need any of these silly tricks.
+      ; Racket's natural cycle detection works fine.
+      (define cb1 cycle-breaker)
+      (define cb2 (base-query-cycle-breaker other))
+      (if (or (cb1) (cb2))
+          (eq? (cb1) (cb2))
+          (let ([cb-value (gensym)])
+            (parameterize ([cb1 cb-value]
+                           [cb2 cb-value])
+              (recur (eq-shim) (send other equal+hash-content))))))
     (define/public (equal-hash-code-of hasher)
       (hasher (eq-shim)))
     (define/public (equal-secondary-hash-code-of hasher)
@@ -170,6 +199,7 @@
       (do-print2 port #f))))
 
 (define base-query-content-builder (class-field-accessor base-query% content-builder))
+(define base-query-cycle-breaker (class-field-accessor base-query% cycle-breaker))
 
 (define query%
   (class* base-query% ()
@@ -190,17 +220,34 @@
    (λ (me) 'from)
    (λ (me) (send me build-print-content #f))))
 
+
+; This is used to bypass a very specific kind of infinite loop.
+; Part of a base-query's content is a *deduplicated* list of attached joins.
+; So in order to build the content, we need to be able deduplicate, which
+; implies that we need to be able to test attached joins for equality.
+; Normal join equality uses `join-target` which can cycle back into the
+; content we are trying to build.
+; So only during this one specific operation, we do equality differently.
+(define deduplicating-attached-joins? (make-parameter #f))
+
 (define join%
   (class* base-query% (join<%>)
     (super-new)
-    (init-field target)
+    (init-field link)
     (inherit-field queryable)
     (inherit query-content attached-joins)
 
     (define/override (equal+hash-content)
       (list (query-content)
             queryable
-            (join-target this)))
+            (if (deduplicating-attached-joins?)
+                ; During deduplication, use `eq?` comparison. This is acceptable
+                ; because we know that J1 and J2 belong to the same query.
+                (make-eq-shim link)
+                ; During a normal comparison, J1 and J2 probably belong to
+                ; different queries Q1 and Q2. In this situation, J1 and J2 can
+                ; only be equal if Q1 and Q2 are also equal.
+                (join-target this))))
 
     (define/override (do-print port mode)
       (let ([found (write-scope-find this)])
@@ -214,7 +261,7 @@
                   [else (print content port mode)]))))))
 
     ; join<%>
-    (define/public (join-link) target)))
+    (define/public (join-link) link)))
 
 (define join-printer
   (make-constructor-style-printer
@@ -323,7 +370,8 @@
   #;(-> content? content?)
   (let ([joins (content-ref content :joins)])
     (content-set content :joins
-                 (remove-duplicates (reverse joins)))))
+                 (parameterize ([deduplicating-attached-joins? #t])
+                   (remove-duplicates (reverse joins))))))
 
 (define (clean-alias id)
   (let* ([id (format "~a" id)]
@@ -362,8 +410,12 @@
                    (call-with-parameterization
                     params
                     (λ ()
-                      (let ([tuple-id tuple])
-                        (apply-all tuple-id (append-content-builder tuple-id)
+                      ; For safety, use private-tuple-id in case the user
+                      ; redefines tuple-id within this scope
+                      (let* ([private-tuple-id tuple]
+                             [tuple-id private-tuple-id])
+                        (apply-all private-tuple-id
+                                   (append-content-builder private-tuple-id)
                                    statement ...)))))])
     (new query%
          [content-builder content-builder]
@@ -389,14 +441,18 @@
                         (call-with-parameterization
                          params
                          (λ ()
-                           (let ([tuple-id tuple])
-                             (apply-all tuple-id (append-content-builder tuple-id)
+                           ; For safety, use private-tuple-id in case the user
+                           ; redefines tuple-id within this scope
+                           (let* ([private-tuple-id tuple]
+                                  [tuple-id private-tuple-id])
+                             (apply-all private-tuple-id
+                                        (append-content-builder private-tuple-id)
                                         statement ...)))))])
          (new join%
               [content-builder content-builder]
               [alias alias]
               [queryable queryable]
-              [target link])))]
+              [link link])))]
     [(_ a b statement ...)
      (syntax/loc stx
        (:join a b #:to #f statement ...))]))
@@ -476,6 +532,28 @@
    (from a "A"
          (attach b "B")
          a b b))
+
+  ; Test deduplication with appending
+  (check-same
+   (from a (from a "A"
+                 (attach b "B")
+                 (list a b))
+         (attach b "B")
+         (list a))
+   (from a "A"
+         (attach b "B")
+         (list a b)
+         (list a)))
+  (check-same
+   (from a (from a "A"
+                 (attach b "B"))
+         (attach b "B")
+         (list a b)
+         (list a))
+   (from a "A"
+         (attach b "B")
+         (list a b)
+         (list a)))
 
   ; test define with a rest arg
   (check-same
